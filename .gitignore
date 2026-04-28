@@ -1,0 +1,22 @@
+# PlatformIO build artifacts
+.pio/
+
+# IDE — keep shareable tasks.json, ignore everything else
+.vscode/*
+!.vscode/tasks.json
+
+# Claude Code local settings
+.claude/
+
+# Local secrets — never commit
+.env
+*.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.bak
+*~
+*.swp

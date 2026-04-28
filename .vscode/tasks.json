@@ -1,0 +1,37 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "PIO: Build",
+      "type": "shell",
+      "command": "pio",
+      "args": ["run"],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "PIO: Upload (USB)",
+      "type": "shell",
+      "command": "pio",
+      "args": ["run", "-t", "upload"],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "PIO: Serial Monitor",
+      "type": "shell",
+      "command": "pio",
+      "args": ["device", "monitor"],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "PIO: Build + Upload",
+      "dependsOn": ["PIO: Build", "PIO: Upload (USB)"],
+      "problemMatcher": []
+    }
+  ]
+}
