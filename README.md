@@ -1,83 +1,87 @@
-# Garden.gg ESP32-CAM Timelapse
+# garden.gg Timelapse Camera
 
-Periodically captures photos with an AI-Thinker ESP32-CAM and uploads them to your garden.gg plot.
+Firmware for a Seeed XIAO ESP32-S3 Sense that periodically captures JPEG photos and uploads them to a garden.gg plot. Includes a captive-portal provisioning flow, a built-in web UI for live preview and reconfiguration, and OTA updates.
 
 ## Hardware
 
-- **AI-Thinker ESP32-CAM** (with OV2640 camera)
-- **FTDI USB-to-Serial adapter** (3.3V) for programming
+- **Seeed XIAO ESP32-S3 Sense** (ESP32-S3 + OV2640 camera + 8 MB PSRAM, native USB-C)
 
-### Wiring (for flashing)
+No external programmer is needed — the board flashes over its built-in USB-C port.
 
-| FTDI   | ESP32-CAM |
-|--------|-----------|
-| GND    | GND       |
-| VCC    | 5V        |
-| TX     | U0R       |
-| RX     | U0T       |
-| —      | IO0 → GND *(only during upload — disconnect after flashing)* |
+## Build
 
-> **Important:** Connect IO0 to GND before powering on to enter flash mode. Remove the jumper after uploading, then press RST to boot normally.
+This is a PlatformIO project. From the repo root:
 
-## Setup
-
-### 1. Get your credentials
-
-- **API Key:** garden.gg → Settings → API Keys → Create Key
-- **Plot ID:** from the URL when viewing your plot (`garden.gg/plots/{PLOT_ID}`)
-
-### 2. Configure the sketch
-
-Open `gardengg-esp32-cam.ino` and edit the defines at the top:
-
-```cpp
-#define WIFI_SSID          "your-network"
-#define WIFI_PASS          "your-password"
-#define API_KEY            "gg_live_xxxxxxxx..."
-#define PLOT_ID            "your-plot-uuid"
+```bash
+pio run -t upload          # build + flash via USB
+pio device monitor         # serial monitor at 115200 baud
 ```
 
-Optional settings:
+The full PlatformIO configuration lives in [`platformio.ini`](platformio.ini). VS Code users can also run the bundled tasks (`Ctrl+Shift+B` for build + upload).
 
-| Define | Default | Description |
-|--------|---------|-------------|
-| `CAPTURE_INTERVAL_MS` | `900000` (15 min) | Time between captures |
-| `IMAGE_QUALITY` | `12` | JPEG quality (10–63, lower = better quality) |
-| `FRAME_SIZE` | `FRAMESIZE_SVGA` | Resolution (800×600) |
-| `USE_DEEP_SLEEP` | `false` | Enable deep sleep for battery power |
-| `GARDENGG_USE_HTTPS` | `true` | Use HTTPS (disable for local testing) |
+## First-boot provisioning
 
-### 3. Flash
+A freshly flashed device boots straight into provisioning mode and broadcasts an open access point named `GardenGG-Setup-XXXX`. Connect to it from a phone or laptop, the captive portal pops automatically (or visit `192.168.4.1`), and enter:
 
-**Arduino IDE:**
-1. Install the ESP32 board package: File → Preferences → add `https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json` to Board Manager URLs
-2. Tools → Board → "AI Thinker ESP32-CAM"
-3. Tools → Port → select your FTDI adapter
-4. Upload
+- WiFi SSID and password
+- garden.gg API key (`gg_live_…`)
+- garden.gg plot ID (the UUID in the plot URL)
+- Capture interval
 
-**PlatformIO:**
-```ini
-[env:esp32cam]
-platform = espressif32
-board = esp32cam
-framework = arduino
-monitor_speed = 115200
+The device saves these to NVS flash, reboots, and starts capturing. See [`SETUP.md`](SETUP.md) for the full walkthrough including factory reset and OTA setup.
+
+## Web UI
+
+Once the device joins your WiFi, the serial log prints its IP. Browse to `http://<device-ip>/` to get:
+
+- Live camera preview with manual refresh and 2-second auto-refresh
+- "Capture & upload now" button
+- Live stats (RSSI, chip temperature, uptime)
+- Configuration form (WiFi, API key, plot picker, interval) — saving WiFi triggers a reboot
+
+## Capture settings
+
+| Setting | Value | Where |
+|---|---|---|
+| Resolution | UXGA (1600×1200) | [`src/main.cpp`](src/main.cpp) `initCamera()` |
+| JPEG quality | 10 (lower = better) | same |
+| Default interval | 1 minute | configurable per-device via the web UI |
+
+JPEG quality below 10 at UXGA is unreliable on the OV2640 — frames silently fail to capture, so 10 is the practical floor.
+
+## OTA updates
+
+On boot and every 24 hours afterwards, the device fetches `https://garden.gg/firmware/esp32cam/latest.json`:
+
+```json
+{ "version": "1.1.0", "url": "https://garden.gg/firmware/esp32cam/v1.1.0.bin" }
 ```
 
-### 4. Local testing
+If `version` differs from the on-device build, the new `.bin` is downloaded and applied. The current firmware version is defined in [`src/firmware_version.h`](src/firmware_version.h).
 
-Point at your dev server:
+## Provisioning automation (optional)
 
-```cpp
-#define GARDENGG_HOST      "192.168.1.37"
-#define GARDENGG_PORT      8080
-#define GARDENGG_USE_HTTPS false
+[`provision.py`](provision.py) drives the provisioning portal end-to-end on Windows: it scans for the `GardenGG-Setup-XXXX` AP, joins it, POSTs the form, and reconnects to your main WiFi. Credentials are read from environment variables — never commit them:
+
+```cmd
+set GARDENGG_WIFI_SSID=your-network
+set GARDENGG_WIFI_PASS=your-password
+set GARDENGG_API_KEY=gg_live_...
+set GARDENGG_PLOT_ID=your-plot-uuid
+python provision.py
 ```
 
-## Operation
+## Project layout
 
-- On boot, captures and uploads one photo immediately
-- Then repeats every `CAPTURE_INTERVAL_MS` (default 15 minutes)
-- LED on GPIO 4 flashes briefly during capture
-- Open Serial Monitor at 115200 baud for status/debug output
-- With `USE_DEEP_SLEEP` enabled, the board resets and runs `setup()` each cycle (lower power, but slower wake)
+```
+src/
+  main.cpp           camera init, web server, capture loop, NVS settings
+  provisioning.cpp   captive-portal AP for first-boot setup
+  config.cpp         NVS read/write helpers (used by provisioning)
+  ota.cpp            OTA update check + apply
+  upload.cpp         multipart upload helper
+  firmware_version.h current build version + OTA manifest URL
+platformio.ini       build configuration (board, USB CDC, PSRAM)
+provision.py         optional CLI provisioning helper (Windows)
+watch-port.ps1       auto-flash when the device is plugged in
+```
