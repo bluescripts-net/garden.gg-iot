@@ -51,13 +51,26 @@ JPEG quality below 10 at UXGA is unreliable on the OV2640 — frames silently fa
 
 ## OTA updates
 
-On boot and every 24 hours afterwards, the device fetches `https://garden.gg/firmware/esp32cam/latest.json`:
+Firmware updates are served from this repo's [GitHub releases](https://github.com/bluescripts-net/garden.gg-iot/releases). The web UI has a **Check for update** button that hits `api.github.com/repos/bluescripts-net/garden.gg-iot/releases/latest`, shows the new version + changelog, and an **Install** button that streams the release's `firmware.bin` asset directly to flash.
 
-```json
-{ "version": "1.1.0", "url": "https://garden.gg/firmware/esp32cam/v1.1.0.bin" }
+Devices can also opt into automatic updates via the **"Automatically install firmware updates"** checkbox in the configuration card. When enabled, the device polls GitHub every 6 hours and self-updates if a newer release exists.
+
+### Versioning (CalVer)
+
+Versions follow `YYYY.MM.DD.N` (e.g. `2026.04.28.0`, then `.1` for a second release the same day). Comparison is lexicographic — keep month/day zero-padded.
+
+The version baked into a build comes from `git describe --tags --always --dirty` via [`version.py`](version.py); there is no `#define` to bump by hand. Outside a git checkout the version falls back to `dev`.
+
+### Cutting a release
+
+```bash
+git tag v2026.04.28.0 -m "Add OTA update UI"
+git push --tags
 ```
 
-If `version` differs from the on-device build, the new `.bin` is downloaded and applied. The current firmware version is defined in [`src/firmware_version.h`](src/firmware_version.h).
+Pushing the tag triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds the firmware on a GitHub-hosted runner and attaches `firmware.bin` to the release. Devices in the field will pick it up on their next manual or auto check.
+
+The release notes you write on GitHub become the changelog shown in the device UI when a user clicks **Check for update**.
 
 ## Provisioning automation (optional)
 
@@ -78,10 +91,12 @@ src/
   main.cpp           camera init, web server, capture loop, NVS settings
   provisioning.cpp   captive-portal AP for first-boot setup
   config.cpp         NVS read/write helpers (used by provisioning)
-  ota.cpp            OTA update check + apply
+  ota.cpp            GitHub releases check + install
   upload.cpp         multipart upload helper
-  firmware_version.h current build version + OTA manifest URL
+  firmware_version.h GitHub repo coordinates + version fallback
 platformio.ini       build configuration (board, USB CDC, PSRAM)
+version.py           pre-build hook injecting FIRMWARE_VERSION from git
+.github/workflows/   CI: build & attach firmware.bin on tag push
 provision.py         optional CLI provisioning helper (Windows)
 watch-port.ps1       auto-flash when the device is plugged in
 ```

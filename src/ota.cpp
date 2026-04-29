@@ -1,133 +1,136 @@
 #include "ota.h"
 #include "firmware_version.h"
-#include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <HTTPClient.h>
 #include <Update.h>
 #include <ArduinoJson.h>
 
-unsigned long OTA::lastCheckTime = 0;
+static const char* RELEASES_URL =
+    "https://api.github.com/repos/" GITHUB_OWNER "/" GITHUB_REPO "/releases/latest";
 
-void OTA::init() {
-  lastCheckTime = millis();
-}
+OTAInfo OTA::check() {
+  OTAInfo info;
+  info.currentVersion = FIRMWARE_VERSION;
+  info.hasUpdate = false;
 
-void OTA::checkAndUpdate() {
   if (WiFi.status() != WL_CONNECTED) {
-    return;
+    info.error = "WiFi not connected";
+    return info;
   }
-
-  unsigned long now = millis();
-  if (now - lastCheckTime < CHECK_INTERVAL) {
-    return;
-  }
-  lastCheckTime = now;
-
-  Serial.println("Checking for firmware updates...");
 
   WiFiClientSecure client;
   client.setInsecure();
 
-  if (!client.connect("garden.gg", 443)) {
-    Serial.println("Failed to connect to update server");
-    return;
+  HTTPClient http;
+  http.setUserAgent("garden.gg-iot/" FIRMWARE_VERSION);
+  http.setTimeout(10000);
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+
+  if (!http.begin(client, RELEASES_URL)) {
+    info.error = "HTTPClient begin failed";
+    return info;
+  }
+  http.addHeader("Accept", "application/vnd.github+json");
+
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) {
+    info.error = "GitHub API HTTP " + String(code);
+    http.end();
+    return info;
   }
 
-  String path = "/firmware/esp32cam/latest.json";
-  client.print("GET " + path + " HTTP/1.1\r\n");
-  client.print("Host: garden.gg\r\n");
-  client.print("Connection: close\r\n\r\n");
-  client.flush();
-
-  unsigned long timeout = millis();
-  while (!client.available() && millis() - timeout < 10000) {
-    delay(10);
-  }
-
-  if (!client.available()) {
-    Serial.println("No response from update server");
-    client.stop();
-    return;
-  }
-
-  String statusLine = client.readStringUntil('\n');
-  while (client.available() && client.read() != '\n') {
-    // Skip headers
-  }
-
-  String response = "";
-  while (client.available()) {
-    response += (char)client.read();
-  }
-  client.stop();
+  JsonDocument filter;
+  filter["tag_name"] = true;
+  filter["body"] = true;
+  filter["assets"][0]["name"] = true;
+  filter["assets"][0]["browser_download_url"] = true;
 
   JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, response);
-  if (error) {
-    Serial.printf("JSON parse error: %s\n", error.c_str());
-    return;
+  DeserializationError err = deserializeJson(
+      doc, http.getStream(), DeserializationOption::Filter(filter));
+  http.end();
+
+  if (err) {
+    info.error = String("JSON parse: ") + err.c_str();
+    return info;
   }
 
-  const char* newVersion = doc["version"];
-  const char* downloadUrl = doc["url"];
+  String tag = doc["tag_name"].as<String>();
+  if (tag.startsWith("v")) tag = tag.substring(1);
+  info.latestVersion = tag;
+  info.changelog = doc["body"].as<String>();
 
-  if (!newVersion || !downloadUrl) {
-    Serial.println("Invalid update manifest");
-    return;
+  for (JsonObject asset : doc["assets"].as<JsonArray>()) {
+    if (asset["name"] == FIRMWARE_ASSET_NAME) {
+      info.downloadUrl = asset["browser_download_url"].as<String>();
+      break;
+    }
   }
 
-  Serial.printf("Current version: %s, Available: %s\n", FIRMWARE_VERSION, newVersion);
-
-  if (strcmp(newVersion, FIRMWARE_VERSION) <= 0) {
-    Serial.println("Already on latest version");
-    return;
+  if (info.downloadUrl.length() == 0) {
+    info.error = "Release has no " FIRMWARE_ASSET_NAME " asset yet";
+    return info;
   }
 
-  Serial.printf("Downloading update from: %s\n", downloadUrl);
+  info.hasUpdate = strcmp(info.latestVersion.c_str(), info.currentVersion.c_str()) > 0;
+  return info;
+}
 
-  WiFiClientSecure updateClient;
-  updateClient.setInsecure();
-
-  if (!updateClient.connect("garden.gg", 443)) {
-    Serial.println("Failed to download firmware");
-    return;
+bool OTA::install(const String& downloadUrl, String& error) {
+  if (WiFi.status() != WL_CONNECTED) {
+    error = "WiFi not connected";
+    return false;
   }
 
-  updateClient.print(String("GET ") + downloadUrl + " HTTP/1.1\r\n");
-  updateClient.print("Host: garden.gg\r\n");
-  updateClient.print("Connection: close\r\n\r\n");
-  updateClient.flush();
+  WiFiClientSecure client;
+  client.setInsecure();
 
-  timeout = millis();
-  while (!updateClient.available() && millis() - timeout < 10000) {
-    delay(10);
+  HTTPClient http;
+  http.setUserAgent("garden.gg-iot/" FIRMWARE_VERSION);
+  http.setTimeout(15000);
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+
+  if (!http.begin(client, downloadUrl)) {
+    error = "HTTPClient begin failed";
+    return false;
   }
 
-  String updateStatusLine = updateClient.readStringUntil('\n');
-  while (updateClient.available() && updateClient.read() != '\n') {
-    // Skip headers
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) {
+    error = "Download HTTP " + String(code);
+    http.end();
+    return false;
   }
 
-  if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
-    Serial.println("OTA begin failed");
-    updateClient.stop();
-    return;
+  int size = http.getSize();
+  Serial.printf("OTA: downloading %d bytes\n", size);
+  Serial.flush();
+
+  if (!Update.begin(size > 0 ? size : UPDATE_SIZE_UNKNOWN)) {
+    error = String("Update.begin: ") + Update.errorString();
+    http.end();
+    return false;
   }
 
-  size_t written = 0;
-  while (updateClient.available()) {
-    uint8_t buf[512];
-    size_t len = updateClient.readBytes(buf, sizeof(buf));
-    Update.write(buf, len);
-    written += len;
+  WiFiClient* stream = http.getStreamPtr();
+  size_t written = Update.writeStream(*stream);
+  http.end();
+
+  if (size > 0 && (int)written != size) {
+    error = "Wrote " + String(written) + "/" + String(size) + " bytes";
+    Update.abort();
+    return false;
   }
 
-  if (Update.end(true)) {
-    Serial.printf("OTA successful, wrote %u bytes. Rebooting...\n", written);
-    delay(1000);
-    ESP.restart();
-  } else {
-    Serial.printf("OTA failed: %s\n", Update.errorString());
-    updateClient.stop();
+  if (!Update.end(true)) {
+    error = String("Update.end: ") + Update.errorString();
+    return false;
   }
+
+  Serial.printf("OTA: flashed %u bytes, rebooting\n", written);
+  Serial.flush();
+  delay(500);
+  ESP.restart();
+  return true;  // unreachable
 }

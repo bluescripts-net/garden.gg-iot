@@ -3,8 +3,13 @@
 #include <WiFiClientSecure.h>
 #include <WebServer.h>
 #include <Preferences.h>
+#include <ArduinoJson.h>
 #include "esp_camera.h"
 #include "provisioning.h"
+#include "ota.h"
+#include "firmware_version.h"
+
+#define AUTO_UPDATE_CHECK_INTERVAL_MS (6UL * 60UL * 60UL * 1000UL)  // 6 hours
 
 #define DEFAULT_WIFI_SSID ""
 #define DEFAULT_WIFI_PASS ""
@@ -36,6 +41,7 @@ static State state = CONNECTING;
 static unsigned long stateStart = 0;
 static unsigned long lastBlink = 0;
 static unsigned long lastCapture = 0;
+static unsigned long lastAutoUpdateCheck = 0;
 static bool cameraOk = false;
 
 static WebServer webServer(80);
@@ -44,6 +50,7 @@ static String wifiPass = DEFAULT_WIFI_PASS;
 static String apiKey = DEFAULT_API_KEY;
 static String plotId = DEFAULT_PLOT_ID;
 static uint32_t captureInterval = DEFAULT_INTERVAL_MS;
+static bool autoUpdate = false;
 
 void loadSettings() {
   Preferences prefs;
@@ -53,9 +60,10 @@ void loadSettings() {
     apiKey = prefs.getString("api_key", DEFAULT_API_KEY);
     plotId = prefs.getString("plot_id", DEFAULT_PLOT_ID);
     captureInterval = prefs.getUInt("intvl_ms", DEFAULT_INTERVAL_MS);
+    autoUpdate = prefs.getBool("auto_upd", false);
     prefs.end();
-    Serial.printf("Settings: wifi=%s plot=%s interval=%ums\n",
-                  wifiSsid.c_str(), plotId.c_str(), captureInterval);
+    Serial.printf("Settings: wifi=%s plot=%s interval=%ums auto_update=%d\n",
+                  wifiSsid.c_str(), plotId.c_str(), captureInterval, autoUpdate);
     Serial.flush();
   }
 }
@@ -68,6 +76,7 @@ void saveSettings() {
     prefs.putString("api_key", apiKey);
     prefs.putString("plot_id", plotId);
     prefs.putUInt("intvl_ms", captureInterval);
+    prefs.putBool("auto_upd", autoUpdate);
     prefs.end();
     Serial.println("Settings saved");
     Serial.flush();
@@ -336,6 +345,7 @@ void handleRoot() {
     <div class="stat"><span>📶</span> <span class="stat-label">Signal</span> <span class="stat-value" id="rssi">)HTML" + String(WiFi.RSSI()) + R"HTML( dBm</span></div>
     <div class="stat"><span>🌡️</span> <span class="stat-label">Chip</span> <span class="stat-value" id="temp">)HTML" + String(temperatureRead(), 1) + R"HTML(&deg;C</span></div>
     <div class="stat"><span>⏱️</span> <span class="stat-label">Uptime</span> <span class="stat-value" id="uptime">)HTML" + String(millis() / 1000) + R"HTML(s</span></div>
+    <div class="stat"><span>🏷️</span> <span class="stat-label">Firmware</span> <span class="stat-value">)HTML" FIRMWARE_VERSION R"HTML(</span></div>
   </div>
 
   <div class="image-wrap">
@@ -349,6 +359,19 @@ void handleRoot() {
       <input type="checkbox" id="autorefresh" onchange="toggleAuto()">
       <span>Auto-refresh (2s)</span>
     </label>
+  </div>
+
+  <div class="card">
+    <h2>🚀 Firmware</h2>
+    <div style="font-size: 0.9rem; color: #6b5d4f;">
+      Current version: <strong style="color: #2a2520;">)HTML" FIRMWARE_VERSION R"HTML(</strong>
+    </div>
+    <div style="display: flex; gap: 10px; margin: 14px 0; flex-wrap: wrap;">
+      <button type="button" onclick="checkUpdate()" class="secondary" id="checkBtn">Check for update</button>
+      <button type="button" onclick="installUpdate()" id="installBtn" style="display:none;">Install update</button>
+    </div>
+    <div id="otaStatus" style="font-size: 0.9rem; color: #857664;"></div>
+    <div id="otaChangelog" style="display:none; margin-top: 12px; padding: 12px; background: #f5efe4; border-radius: 8px; font-family: ui-monospace, monospace; font-size: 0.85rem; white-space: pre-wrap; max-height: 240px; overflow-y: auto;"></div>
   </div>
 
   <div class="card">
@@ -386,6 +409,11 @@ void handleRoot() {
         <option value="7200000")HTML" + (captureInterval == 7200000 ? " selected" : "") + R"HTML(>2 hours</option>
         <option value="21600000")HTML" + (captureInterval == 21600000 ? " selected" : "") + R"HTML(>6 hours</option>
       </select>
+
+      <label class="toggle" style="margin-top: 16px;">
+        <input type="checkbox" name="auto_update")HTML" + (autoUpdate ? " checked" : "") + R"HTML(>
+        <span>Automatically install firmware updates (checks every 6 hours)</span>
+      </label>
 
       <button type="submit" class="save-btn">💾 Save Configuration</button>
     </form>
@@ -476,6 +504,74 @@ void handleRoot() {
       clearTimeout(apiKeyTimer);
       apiKeyTimer = setTimeout(loadPlots, 600);
     });
+
+    let pendingDownloadUrl = null;
+
+    async function checkUpdate() {
+      const status = document.getElementById('otaStatus');
+      const changelog = document.getElementById('otaChangelog');
+      const installBtn = document.getElementById('installBtn');
+      const checkBtn = document.getElementById('checkBtn');
+
+      checkBtn.disabled = true;
+      status.textContent = 'Checking GitHub for releases…';
+      changelog.style.display = 'none';
+      installBtn.style.display = 'none';
+
+      try {
+        const r = await fetch('/ota/check');
+        const data = await r.json();
+
+        if (data.error) {
+          status.textContent = '⚠️ ' + data.error;
+          return;
+        }
+
+        if (data.hasUpdate) {
+          status.innerHTML = '✨ <strong>' + data.latest + '</strong> available (you are on ' + data.current + ')';
+          changelog.textContent = data.changelog || '(no changelog)';
+          changelog.style.display = 'block';
+          installBtn.style.display = 'inline-block';
+          installBtn.textContent = 'Install ' + data.latest;
+          pendingDownloadUrl = data.downloadUrl;
+        } else {
+          status.textContent = '✓ Up to date (' + data.current + ')';
+        }
+      } catch(e) {
+        status.textContent = '⚠️ ' + e.message;
+      } finally {
+        checkBtn.disabled = false;
+      }
+    }
+
+    async function installUpdate() {
+      const status = document.getElementById('otaStatus');
+      const installBtn = document.getElementById('installBtn');
+      const checkBtn = document.getElementById('checkBtn');
+
+      if (!confirm('Install the new firmware? The device will reboot.')) return;
+
+      installBtn.disabled = true;
+      checkBtn.disabled = true;
+      status.textContent = 'Downloading and flashing… do not unplug. Page will reload in ~45s.';
+
+      try {
+        const r = await fetch('/ota/install', { method: 'POST' });
+        const data = await r.json().catch(() => ({}));
+        if (data.error) {
+          status.textContent = '⚠️ ' + data.error;
+          installBtn.disabled = false;
+          checkBtn.disabled = false;
+          return;
+        }
+        // Device is rebooting. Wait then reload.
+        setTimeout(() => window.location.reload(), 45000);
+      } catch(e) {
+        // Connection drop is expected during reboot — treat as success.
+        status.textContent = 'Device rebooting… reloading shortly.';
+        setTimeout(() => window.location.reload(), 45000);
+      }
+    }
   </script>
 </body>
 </html>)HTML";
@@ -542,6 +638,8 @@ void handleConfig() {
       captureInterval = newInterval;
     }
   }
+
+  autoUpdate = webServer.hasArg("auto_update");
 
   saveSettings();
 
@@ -667,6 +765,60 @@ void handlePlots() {
   webServer.send(200, "application/json", body);
 }
 
+void handleOtaCheck() {
+  OTAInfo info = OTA::check();
+  JsonDocument doc;
+  doc["current"] = info.currentVersion;
+  doc["latest"] = info.latestVersion;
+  doc["changelog"] = info.changelog;
+  doc["downloadUrl"] = info.downloadUrl;
+  doc["hasUpdate"] = info.hasUpdate;
+  if (info.error.length() > 0) doc["error"] = info.error;
+
+  String out;
+  serializeJson(doc, out);
+  int code = info.error.length() > 0 ? 502 : 200;
+  webServer.send(code, "application/json", out);
+}
+
+void handleOtaInstall() {
+  OTAInfo info = OTA::check();
+  if (info.error.length() > 0) {
+    JsonDocument doc;
+    doc["error"] = info.error;
+    String out;
+    serializeJson(doc, out);
+    webServer.send(502, "application/json", out);
+    return;
+  }
+  if (!info.hasUpdate) {
+    webServer.send(200, "application/json",
+                   "{\"installing\":false,\"message\":\"already on latest\"}");
+    return;
+  }
+
+  // Reply before flashing — the browser will see the connection drop on reboot.
+  JsonDocument doc;
+  doc["installing"] = true;
+  doc["version"] = info.latestVersion;
+  String out;
+  serializeJson(doc, out);
+  webServer.send(200, "application/json", out);
+  webServer.client().flush();
+  delay(200);
+
+  Serial.printf("OTA: installing %s\n", info.latestVersion.c_str());
+  Serial.flush();
+
+  String error;
+  bool ok = OTA::install(info.downloadUrl, error);
+  if (!ok) {
+    Serial.printf("OTA install failed: %s\n", error.c_str());
+    Serial.flush();
+  }
+  // On success, OTA::install reboots and we never reach here.
+}
+
 void setupWebServer() {
   webServer.on("/", handleRoot);
   webServer.on("/capture", handleCapture);
@@ -674,6 +826,8 @@ void setupWebServer() {
   webServer.on("/config", HTTP_POST, handleConfig);
   webServer.on("/stats", handleStats);
   webServer.on("/plots", handlePlots);
+  webServer.on("/ota/check", handleOtaCheck);
+  webServer.on("/ota/install", HTTP_POST, handleOtaInstall);
   webServer.begin();
   Serial.println("Web server started on port 80");
   Serial.flush();
@@ -718,6 +872,9 @@ void loop() {
       setupWebServer();
 
       lastCapture = now - captureInterval + 5000;
+      // First auto-update check fires ~2 minutes after connect, not on the
+      // full 6-hour interval, so freshly flashed devices pull updates promptly.
+      lastAutoUpdateCheck = now - AUTO_UPDATE_CHECK_INTERVAL_MS + 120000;
       return;
     }
 
@@ -765,6 +922,27 @@ void loop() {
         lastCapture = now;
       } else {
         Serial.println("Upload: FAILED\n");
+      }
+      Serial.flush();
+    }
+
+    if (autoUpdate && now - lastAutoUpdateCheck >= AUTO_UPDATE_CHECK_INTERVAL_MS) {
+      lastAutoUpdateCheck = now;
+      Serial.println("Auto-update: checking GitHub releases");
+      Serial.flush();
+      OTAInfo info = OTA::check();
+      if (info.error.length() > 0) {
+        Serial.printf("Auto-update check failed: %s\n", info.error.c_str());
+      } else if (info.hasUpdate) {
+        Serial.printf("Auto-update: installing %s (was %s)\n",
+                      info.latestVersion.c_str(), info.currentVersion.c_str());
+        String error;
+        OTA::install(info.downloadUrl, error);
+        if (error.length() > 0) {
+          Serial.printf("Auto-update install failed: %s\n", error.c_str());
+        }
+      } else {
+        Serial.printf("Auto-update: on latest (%s)\n", info.currentVersion.c_str());
       }
       Serial.flush();
     }

@@ -43,21 +43,19 @@ Hold the **BOOT button** (on the ESP32) for 5 seconds at startup. Device will er
 
 ## OTA Updates
 
-Place firmware binary at `https://garden.gg/firmware/esp32cam/latest.json` with this structure:
-```json
-{
-  "version": "1.1.0",
-  "url": "https://garden.gg/firmware/esp32cam/v1.1.0.bin"
-}
-```
+Updates are served from [GitHub releases](https://github.com/bluescripts-net/garden.gg-iot/releases). See the OTA section of [README.md](README.md) for the full release workflow. In short: tag with CalVer (`v2026.04.28.0`), push the tag, GitHub Actions builds and attaches `firmware.bin`, and devices pick it up via the **Check for update** button or the auto-update toggle.
 
-Device checks for updates every 24 hours. On reboot, firmware version is printed to serial.
-
-### Build OTA Binary
+### Building locally
 
 ```bash
 pio run
-# Binary is at .pio/build/freenove_esp32s3_cam/firmware.bin
+# Binary is at .pio/build/xiao_esp32s3_sense/firmware.bin
+```
+
+The version baked in matches `git describe --tags --always --dirty`. To inspect it without flashing:
+
+```bash
+pio run 2>&1 | grep FIRMWARE_VERSION
 ```
 
 ## Auto-Upload on Plug-In
@@ -83,14 +81,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File watch-port.ps1
 - Reset and re-enter provisioning
 
 **OTA fails:**
-- Ensure device has internet connectivity
-- Check OTA manifest URL is reachable (browser test)
-- Serial output shows error code — compare against ESP error codes
+- Ensure device has internet connectivity (and that DNS/HTTPS to api.github.com works on its WiFi)
+- Confirm the latest GitHub release actually has a `firmware.bin` asset attached — releases without one won't trigger the install button
+- Watch the serial output during install: `OTA: downloading N bytes` should appear, followed by `OTA: flashed N bytes, rebooting`
 
 ## Configuration Storage
 
 All settings stored in ESP32 NVS (non-volatile storage / flash):
 - Namespace: `gardengg`
-- Keys: `wifi_ssid`, `wifi_pass`, `api_key`, `plot_id`, `intvl_ms`
+- Keys: `wifi_ssid`, `wifi_pass`, `api_key`, `plot_id`, `intvl_ms`, `auto_upd`
 
 To inspect/edit manually, use `espefuse.py` or a dedicated NVS editor tool.
