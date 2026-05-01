@@ -22,7 +22,7 @@ bool Config::load(ConfigData& config) {
   String pass = prefs.getString("wifi_pass", "");
   String api_key = prefs.getString("api_key", "");
   String plot_id = prefs.getString("plot_id", "");
-  config.capture_interval_ms = prefs.getUInt("capture_interval", 900000);
+  config.capture_interval_ms = prefs.getUInt("intvl_ms", 900000);
 
   prefs.end();
 
@@ -51,7 +51,7 @@ void Config::save(const ConfigData& config) {
   prefs.putString("wifi_pass", config.wifi_pass);
   prefs.putString("api_key", config.api_key);
   prefs.putString("plot_id", config.plot_id);
-  prefs.putUInt("capture_interval", config.capture_interval_ms);
+  prefs.putUInt("intvl_ms", config.capture_interval_ms);
 
   prefs.end();
   Serial.println("Config::save complete");

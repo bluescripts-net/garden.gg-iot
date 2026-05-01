@@ -917,9 +917,13 @@ void loop() {
       Serial.printf("\nCapture cycle at %lu ms\n", now);
       Serial.flush();
 
+      // Always advance the schedule so failed uploads don't hammer the
+      // server every loop iteration (e.g., when plot_id is unset and
+      // garden.gg returns 429).
+      lastCapture = now;
+
       if (captureAndUpload()) {
         Serial.println("Upload: SUCCESS\n");
-        lastCapture = now;
       } else {
         Serial.println("Upload: FAILED\n");
       }
